@@ -19,7 +19,9 @@ def _has_module(name: str) -> bool:
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Callable, Optional, Dict, List, Tuple, Union
+
+logger = logging.getLogger("rp_extractor")
 
 DEBUG_DUMP_DIR: Optional[str] = None
 TRACK14 = r"8\d{13}"
@@ -72,6 +74,22 @@ else:  # pragma: no cover - exercised via fallback branches
     pytesseract = None  # type: ignore
 
 OCR_AVAILABLE = _pdf2image_available and _pytesseract_available
+
+
+def _configure_logging(log_path: str) -> None:
+    if not log_path:
+        return
+    try:
+        path = Path(log_path)
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        root.addHandler(handler)
+    except Exception:
+        logger.exception("Failed to configure logging to %s", log_path)
 
 if os.name == "nt" and pytesseract is not None:
     tp = os.environ.get("TESSERACT_PATH")
@@ -132,6 +150,108 @@ def get_page_count(pdf_path: Path) -> int:
         except Exception:
             pass
     return 1
+
+
+def _coerce_cancel_callback(cancel_cb: Optional[Union[Callable[[], bool], str, os.PathLike]]) -> Optional[Callable[[], bool]]:
+    if cancel_cb is None:
+        return None
+    if callable(cancel_cb):
+        return cancel_cb
+    path = Path(cancel_cb)
+
+    def _check() -> bool:
+        try:
+            return path.exists()
+        except Exception:
+            return False
+
+    return _check
+
+
+def _dump_debug_text(pdf_path: Path, page_idx: int, kind: str, text: str) -> None:
+    if not DEBUG_DUMP_DIR or not text:
+        return
+    try:
+        base = Path(DEBUG_DUMP_DIR)
+        base.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", pdf_path.stem)
+        out = base / f"{safe_name}_p{page_idx + 1}_{kind}_{os.getpid()}.txt"
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except Exception:
+        logger.debug("Failed to dump debug text for %s page %s", pdf_path, page_idx + 1, exc_info=True)
+
+
+def _should_cancel(cancel_file: Optional[Union[str, os.PathLike]]) -> bool:
+    if not cancel_file:
+        return False
+    try:
+        return Path(cancel_file).exists()
+    except Exception:
+        return False
+
+
+def process_pdf_files(pdfs: List[Path],
+                      workers: int,
+                      process_kwargs: Dict[str, object],
+                      cancel_file: Optional[Union[str, os.PathLike]] = None,
+                      progress_cb: Optional[Callable[[Dict[str, Optional[str]]], None]] = None
+                      ) -> List[Dict[str, Optional[str]]]:
+    if not pdfs:
+        return []
+    if _should_cancel(cancel_file):
+        return []
+    results: Dict[int, Dict[str, Optional[str]]] = {}
+    max_workers = workers if isinstance(workers, int) else 1
+    if max_workers <= 0:
+        cpu = os.cpu_count() or 1
+        max_workers = max(1, cpu)
+    max_workers = min(max_workers, len(pdfs))
+
+    def _handle_result(idx: int, record: Dict[str, Optional[str]]):
+        results[idx] = record
+        if progress_cb:
+            try:
+                progress_cb(record)
+            except Exception:
+                logger.debug("Progress callback failed for %s", record.get("source"), exc_info=True)
+
+    if max_workers == 1:
+        for idx, pdf in enumerate(pdfs):
+            if _should_cancel(cancel_file):
+                break
+            try:
+                rec = process_pdf(pdf, **process_kwargs)
+            except Exception:
+                logger.exception("Failed to process %s", pdf)
+                rec = {"source": pdf.name, "track": None, "code": None, "method": "error"}
+            _handle_result(idx, rec)
+            if rec.get("method") == "canceled":
+                break
+    else:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        futures: Dict[concurrent.futures.Future, int] = {}
+        try:
+            for idx, pdf in enumerate(pdfs):
+                if _should_cancel(cancel_file):
+                    break
+                future = executor.submit(process_pdf, pdf, **process_kwargs)
+                futures[future] = idx
+            for future in concurrent.futures.as_completed(futures):
+                idx = futures[future]
+                try:
+                    rec = future.result()
+                except Exception:
+                    logger.exception("Failed to process %s", pdfs[idx])
+                    rec = {"source": pdfs[idx].name, "track": None, "code": None, "method": "error"}
+                _handle_result(idx, rec)
+                if rec.get("method") == "canceled" or _should_cancel(cancel_file):
+                    break
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    ordered = [results[idx] for idx in sorted(results)]
+    return ordered
 
 
 def _extract_line_context(text: str, start: int, end: int) -> Tuple[str, str, str]:
@@ -316,32 +436,49 @@ def process_pdf(pdf_path: Path,
                 ocr_dpi=300,
                 ocr_lang="rus+eng") -> Dict[str, Optional[str]]:
     res = {"source": pdf_path.name, "track": None, "code": None, "method": ""}
+    cancel_fn = _coerce_cancel_callback(cancel_cb)
+    ocr_threshold = max(0, int(min_chars_for_ocr or 0))
     total_pages = max(1, get_page_count(pdf_path))
     pages = list(range(total_pages-1, -1, -1))
     if max_pages_back > 0: pages = pages[:max_pages_back]
 
     for pidx in pages:
-        if cancel_cb and cancel_cb(): res["method"]="canceled"; return res
-        tr=cd=None; txt=""; method=""
+        if cancel_fn and cancel_fn():
+            res["method"] = "canceled"
+            return res
+        tr = cd = None
+        txt = ""
+        method = ""
         if not force_ocr:
             txt = extract_page_text_pdfminer(pdf_path, pidx)
-            tr,cd = sniff_track_code_with_labels(txt); method="text"
-        if (force_ocr or (not tr or not cd)) and enable_ocr:
+            if txt:
+                _dump_debug_text(pdf_path, pidx, "text", txt)
+            tr, cd = sniff_track_code_with_labels(txt)
+            if tr and cd:
+                method = "text"
+        need_ocr = False
+        if enable_ocr:
+            if force_ocr:
+                need_ocr = True
+            elif (not tr or not cd) and len(txt) < ocr_threshold:
+                need_ocr = True
+        if need_ocr:
             ocr_txt = extract_page_text_ocr(pdf_path, pidx, dpi=ocr_dpi, lang=ocr_lang)
             if ocr_txt:
-                tr2,cd2 = sniff_track_code_with_labels(ocr_txt)
-                if tr2 and cd2: tr,cd=tr2,cd2; method="ocr"
+                _dump_debug_text(pdf_path, pidx, "ocr", ocr_txt)
+                tr2, cd2 = sniff_track_code_with_labels(ocr_txt)
+                if tr2 and cd2:
+                    tr, cd = tr2, cd2
+                    method = "ocr"
         if tr and cd:
-            res.update(track=tr, code=cd, method=method); return res
+            res.update(track=tr, code=cd, method=method)
+            return res
     return res
 
 
 def walk_pdfs(path: Path):
     if path.is_file() and path.suffix.lower()==".pdf": return [path]
     return sorted(p for p in path.rglob("*.pdf") if p.is_file())
-
-
-def _process_pdf_wrapper(args): return process_pdf(Path(args[0]), *args[1:])
 
 
 def run_cli():
@@ -362,31 +499,48 @@ def run_cli():
     ap.add_argument("--log", default=None)
     args = ap.parse_args()
 
+    if args.log:
+        _configure_logging(args.log)
+
+    global DEBUG_DUMP_DIR
+    DEBUG_DUMP_DIR = str(Path(args.debug_dump_text).expanduser()) if args.debug_dump_text else None
+
     pdfs = walk_pdfs(Path(args.input))
     total = len(pdfs)
-    cancel_cb = None
-    if args.cancel_file:
-        def cancel_cb():
-            try:
-                return os.path.exists(args.cancel_file)
-            except Exception:
-                return False
+    cancel_file = args.cancel_file or None
     if args.progress_stdout:
         print(json.dumps({"event": "start", "total": total}), flush=True)
 
-    results = []
-    for pdf in pdfs:
-        if cancel_cb and cancel_cb():
-            break
-        rec = process_pdf(pdf, args.max_pages_back, args.min_chars_for_ocr, not args.no_ocr,
-                          cancel_cb=cancel_cb, force_ocr=args.force_ocr,
-                          ocr_dpi=args.dpi, ocr_lang=args.lang)
-        results.append(rec)
-        if args.progress_stdout:
-            evt = {"event": "progress", "file": rec["source"],
-                   "track": rec.get("track"), "code": rec.get("code"),
-                   "method": rec.get("method")}
+    enable_ocr = (not args.no_ocr) or args.force_ocr
+    process_kwargs = {
+        "max_pages_back": args.max_pages_back,
+        "min_chars_for_ocr": args.min_chars_for_ocr,
+        "enable_ocr": enable_ocr,
+        "cancel_cb": cancel_file,
+        "force_ocr": args.force_ocr,
+        "ocr_dpi": args.dpi,
+        "ocr_lang": args.lang,
+    }
+
+    progress_cb = None
+    if args.progress_stdout:
+        def progress_cb(rec: Dict[str, Optional[str]]):
+            evt = {
+                "event": "progress",
+                "file": rec.get("source"),
+                "track": rec.get("track"),
+                "code": rec.get("code"),
+                "method": rec.get("method"),
+            }
             print(json.dumps(evt, ensure_ascii=False), flush=True)
+
+    results = process_pdf_files(
+        pdfs,
+        workers=args.workers,
+        process_kwargs=process_kwargs,
+        cancel_file=cancel_file,
+        progress_cb=progress_cb,
+    )
 
     out_enc = "utf-8-sig" if os.name == "nt" else "utf-8"
     if args.csv or args.output.lower().endswith(".csv"):
