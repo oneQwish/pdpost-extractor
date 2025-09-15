@@ -8,6 +8,15 @@ Russian Post PDF Extractor — CLI (GUI-compatible)
 """
 
 import argparse, os, re, sys, csv, json, logging, concurrent.futures
+import importlib.util
+
+
+def _has_module(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:  # pragma: no cover - depends on environment
+        return False
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -16,10 +25,18 @@ DEBUG_DUMP_DIR: Optional[str] = None
 TRACK14 = r"8\d{13}"
 
 LOGO_RE = re.compile(r"почта\s+россии", re.I)
-TRACK_LABEL_RE = re.compile(r"(трек.*номер|трек\s*№|почтовый\s+идентификатор|идентификатор\s+отправления)", re.I)
-CODE_LABEL_RE = re.compile(r"код\s*доступа", re.I)
-TRACK_CONTEXT_RE = re.compile(r"(трек|идентификатор|почтов)", re.I)
-CODE_CONTEXT_RE = re.compile(r"(код|доступ)", re.I)
+
+TRACK_LABEL_RE = re.compile(
+    r"(трек\s*[-№]*\s*номер|почтов[а-я\s]*идентификатор|идентификатор\s+отправления|шпи|штрих\s*код)",
+    re.I,
+)
+CODE_LABEL_RE = re.compile(
+    r"(код\s*(?:доступа|для\s+получения|получения|письма)|доступ\s*код)",
+    re.I,
+)
+TRACK_CONTEXT_RE = re.compile(r"(трек|идентификатор|почтов|шпи|штрих)", re.I)
+CODE_CONTEXT_RE = re.compile(r"(\bкод\b|\bдоступ|\bполуч|\bписьм)", re.I)
+
 TRACK_SEQ_RE = re.compile(r"8(?:[\s\u00a0-]*\d){13}")
 CODE_SEQ_RE = re.compile(r"\d(?:[\s\u00a0-]*\d){7}")
 
@@ -31,19 +48,32 @@ class _NumberCandidate:
     end: int
     score: int
 
-from pdfminer.high_level import extract_text
-from pdfminer.pdfpage import PDFPage
-from pdfminer.pdfparser import PDFParser
-from pdfminer.pdfdocument import PDFDocument
 
-try:
+_pdfminer_available = _has_module("pdfminer.high_level")
+if _pdfminer_available:
+    from pdfminer.high_level import extract_text
+    from pdfminer.pdfpage import PDFPage
+    from pdfminer.pdfparser import PDFParser
+    from pdfminer.pdfdocument import PDFDocument
+else:  # pragma: no cover - exercised via fallback branches
+    extract_text = None  # type: ignore
+    PDFPage = PDFParser = PDFDocument = None  # type: ignore
+
+_pdf2image_available = _has_module("pdf2image")
+_pytesseract_available = _has_module("pytesseract")
+if _pdf2image_available:
     from pdf2image import convert_from_path
-    import pytesseract
-    OCR_AVAILABLE = True
-except Exception:
-    OCR_AVAILABLE = False
+else:  # pragma: no cover - exercised via fallback branches
+    convert_from_path = None  # type: ignore
 
-if os.name == "nt":
+if _pytesseract_available:
+    import pytesseract
+else:  # pragma: no cover - exercised via fallback branches
+    pytesseract = None  # type: ignore
+
+OCR_AVAILABLE = _pdf2image_available and _pytesseract_available
+
+if os.name == "nt" and pytesseract is not None:
     tp = os.environ.get("TESSERACT_PATH")
     if not tp or not os.path.exists(tp):
         base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -53,14 +83,12 @@ if os.name == "nt":
         if cand.exists():
             tp = str(cand)
     if tp and os.path.exists(tp):
-        try:
-            import pytesseract  # type: ignore
-            pytesseract.pytesseract.tesseract_cmd = tp
-        except Exception:
-            pass
+        pytesseract.pytesseract.tesseract_cmd = tp
 
 
 def extract_page_text_pdfminer(pdf_path: Path, pidx: int) -> str:
+    if not _pdfminer_available or extract_text is None:
+        return ""
     try:
         return extract_text(str(pdf_path), page_numbers=[pidx]) or ""
     except Exception:
@@ -68,7 +96,7 @@ def extract_page_text_pdfminer(pdf_path: Path, pidx: int) -> str:
 
 
 def extract_page_text_ocr(pdf_path: Path, pidx: int, dpi: int = 300, lang: str = "rus+eng") -> str:
-    if not OCR_AVAILABLE:
+    if not OCR_AVAILABLE or convert_from_path is None or pytesseract is None:
         return ""
     poppler_path = os.environ.get("POPPLER_PATH")
     if not poppler_path:
@@ -89,22 +117,54 @@ def extract_page_text_ocr(pdf_path: Path, pidx: int, dpi: int = 300, lang: str =
 
 
 def get_page_count(pdf_path: Path) -> int:
-    try:
-        with open(pdf_path, "rb") as f:
-            parser = PDFParser(f); doc = PDFDocument(parser)
-            return sum(1 for _ in PDFPage.create_pages(doc))
-    except Exception:
+    if _pdfminer_available and PDFParser and PDFDocument and PDFPage:
+        try:
+            with open(pdf_path, "rb") as f:
+                parser = PDFParser(f)
+                doc = PDFDocument(parser)
+                return sum(1 for _ in PDFPage.create_pages(doc))
+        except Exception:
+            pass
+    if convert_from_path is not None:
         try:
             convert_from_path(str(pdf_path), first_page=1, last_page=1)
             return 2
         except Exception:
-            return 1
+            pass
+    return 1
 
 
-def _has_context(pattern: re.Pattern, text: str, start: int, end: int, radius: int = 80) -> bool:
-    left = max(0, start - radius)
-    right = min(len(text), end + radius)
-    return bool(pattern.search(text[left:right]))
+def _extract_line_context(text: str, start: int, end: int) -> Tuple[str, str, str]:
+    """Return the line containing the span together with its neighbours."""
+    line_start = text.rfind("\n", 0, start)
+    if line_start == -1:
+        line_start = 0
+    else:
+        line_start += 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    line_text = text[line_start:line_end]
+
+    prev_line = ""
+    if line_start > 0:
+        prev_end = line_start - 1
+        prev_start = text.rfind("\n", 0, prev_end)
+        if prev_start == -1:
+            prev_start = 0
+        else:
+            prev_start += 1
+        prev_line = text[prev_start:prev_end]
+
+    next_line = ""
+    if line_end < len(text):
+        next_start = line_end + 1
+        next_end = text.find("\n", next_start)
+        if next_end == -1:
+            next_end = len(text)
+        next_line = text[next_start:next_end]
+
+    return line_text, prev_line, next_line
 
 
 def _match_after_label(segment: str, start_idx: int, seq_re: re.Pattern, expected_len: int, base_score: int) -> Optional[_NumberCandidate]:
@@ -144,7 +204,7 @@ def _choose_best_pair(tracks: List[_NumberCandidate], codes: List[_NumberCandida
                 gap = c.start - t.end
             else:
                 gap = t.start - c.end
-            if gap > 200:
+            if gap > 350:
                 continue
             order_bonus = 1 if t.start <= c.start else 0
             score_key = (t.score + c.score, order_bonus, -gap)
@@ -155,7 +215,8 @@ def _choose_best_pair(tracks: List[_NumberCandidate], codes: List[_NumberCandida
 
 
 def sniff_track_code_with_labels(text: str):
-    t = text.replace("\xa0", " ")
+    t = text.replace("\xa0", " ").replace("\u202f", " ")
+
     segments = []
     logo_matches = list(LOGO_RE.finditer(t))
     if logo_matches:
@@ -211,9 +272,22 @@ def sniff_track_code_with_labels(text: str):
             context = segment[max(0, start - 80):min(len(segment), end + 80)]
             if not CODE_CONTEXT_RE.search(context):
                 continue
+            line_text, prev_line, next_line = _extract_line_context(segment, start, end)
+            line_has_code_kw = bool(CODE_CONTEXT_RE.search(line_text))
+            nearby_code_kw = line_has_code_kw or bool(CODE_CONTEXT_RE.search(prev_line)) or bool(CODE_CONTEXT_RE.search(next_line))
+            if not nearby_code_kw:
+                continue
+            if TRACK_CONTEXT_RE.search(line_text) and not line_has_code_kw:
+                continue
             score = 2
-            if CODE_LABEL_RE.search(context):
+            if CODE_LABEL_RE.search(line_text) or CODE_LABEL_RE.search(prev_line):
+                score = 5
+            elif CODE_LABEL_RE.search(next_line):
+                score = max(score, 5)
+            elif line_has_code_kw:
                 score = 4
+            elif CODE_CONTEXT_RE.search(prev_line) or CODE_CONTEXT_RE.search(next_line):
+                score = 3
             code_candidates.append(_NumberCandidate(digits, start, end, score))
 
         track_candidates = _dedup_candidates(track_candidates)
