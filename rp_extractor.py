@@ -16,6 +16,7 @@ def _has_module(name: str) -> bool:
         return importlib.util.find_spec(name) is not None
     except ModuleNotFoundError:  # pragma: no cover - depends on environment
         return False
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -24,6 +25,7 @@ DEBUG_DUMP_DIR: Optional[str] = None
 TRACK14 = r"8\d{13}"
 
 LOGO_RE = re.compile(r"почта\s+россии", re.I)
+
 TRACK_LABEL_RE = re.compile(
     r"(трек\s*[-№]*\s*номер|почтов[а-я\s]*идентификатор|идентификатор\s+отправления|шпи|штрих\s*код)",
     re.I,
@@ -34,6 +36,7 @@ CODE_LABEL_RE = re.compile(
 )
 TRACK_CONTEXT_RE = re.compile(r"(трек|идентификатор|почтов|шпи|штрих)", re.I)
 CODE_CONTEXT_RE = re.compile(r"(\bкод\b|\bдоступ|\bполуч|\bписьм)", re.I)
+
 TRACK_SEQ_RE = re.compile(r"8(?:[\s\u00a0-]*\d){13}")
 CODE_SEQ_RE = re.compile(r"\d(?:[\s\u00a0-]*\d){7}")
 
@@ -44,6 +47,7 @@ class _NumberCandidate:
     start: int
     end: int
     score: int
+
 
 _pdfminer_available = _has_module("pdfminer.high_level")
 if _pdfminer_available:
@@ -212,6 +216,7 @@ def _choose_best_pair(tracks: List[_NumberCandidate], codes: List[_NumberCandida
 
 def sniff_track_code_with_labels(text: str):
     t = text.replace("\xa0", " ").replace("\u202f", " ")
+
     segments = []
     logo_matches = list(LOGO_RE.finditer(t))
     if logo_matches:

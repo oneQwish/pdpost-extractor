@@ -7,7 +7,6 @@ from rp_extractor import sniff_track_code_with_labels
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-
 def test_sniff_with_clear_labels():
     text = (
         "Железнодорожный городской суд Московской области\n"
@@ -65,7 +64,6 @@ def test_sniff_handles_track_without_label():
     assert track == "80065036285004"
     assert code == "23456789"
 
-
 def test_sniff_with_real_ocr_text_from_attachment():
     text = (FIXTURES / "letter_image2_ocr.txt").read_text(encoding="utf-8")
     track, code = sniff_track_code_with_labels(text)
@@ -105,3 +103,4 @@ def test_sniff_detects_code_with_label_on_previous_line():
     track, code = sniff_track_code_with_labels(text)
     assert track == "80001234567890"
     assert code == "11223344"
+    
