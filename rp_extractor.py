@@ -8,11 +8,28 @@ Russian Post PDF Extractor — CLI (GUI-compatible)
 """
 
 import argparse, os, re, sys, csv, json, logging, concurrent.futures
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 DEBUG_DUMP_DIR: Optional[str] = None
 TRACK14 = r"8\d{13}"
+
+LOGO_RE = re.compile(r"почта\s+россии", re.I)
+TRACK_LABEL_RE = re.compile(r"(трек.*номер|трек\s*№|почтовый\s+идентификатор|идентификатор\s+отправления)", re.I)
+CODE_LABEL_RE = re.compile(r"код\s*доступа", re.I)
+TRACK_CONTEXT_RE = re.compile(r"(трек|идентификатор|почтов)", re.I)
+CODE_CONTEXT_RE = re.compile(r"(код|доступ)", re.I)
+TRACK_SEQ_RE = re.compile(r"8(?:[\s\u00a0-]*\d){13}")
+CODE_SEQ_RE = re.compile(r"\d(?:[\s\u00a0-]*\d){7}")
+
+
+@dataclass
+class _NumberCandidate:
+    value: str
+    start: int
+    end: int
+    score: int
 
 from pdfminer.high_level import extract_text
 from pdfminer.pdfpage import PDFPage
@@ -84,47 +101,136 @@ def get_page_count(pdf_path: Path) -> int:
             return 1
 
 
+def _has_context(pattern: re.Pattern, text: str, start: int, end: int, radius: int = 80) -> bool:
+    left = max(0, start - radius)
+    right = min(len(text), end + radius)
+    return bool(pattern.search(text[left:right]))
+
+
+def _match_after_label(segment: str, start_idx: int, seq_re: re.Pattern, expected_len: int, base_score: int) -> Optional[_NumberCandidate]:
+    window = segment[start_idx:start_idx + 500]
+    m = seq_re.search(window)
+    if not m:
+        return None
+    digits = re.sub(r"\D", "", m.group())
+    if len(digits) != expected_len:
+        return None
+    if expected_len == 14 and not re.fullmatch(TRACK14, digits):
+        return None
+    return _NumberCandidate(digits, start_idx + m.start(), start_idx + m.end(), base_score)
+
+
+def _dedup_candidates(candidates: List[_NumberCandidate]) -> List[_NumberCandidate]:
+    ordered = sorted(candidates, key=lambda c: (-c.score, c.start, c.end, c.value))
+    seen = set()
+    result: List[_NumberCandidate] = []
+    for cand in ordered:
+        key = (cand.value, cand.start, cand.end)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cand)
+    return result
+
+
+def _choose_best_pair(tracks: List[_NumberCandidate], codes: List[_NumberCandidate]):
+    best_pair = None
+    best_key = (-1, -1, -1)
+    for t in tracks:
+        for c in codes:
+            if c.start < t.end and c.end > t.start:
+                continue
+            if c.start >= t.end:
+                gap = c.start - t.end
+            else:
+                gap = t.start - c.end
+            if gap > 200:
+                continue
+            order_bonus = 1 if t.start <= c.start else 0
+            score_key = (t.score + c.score, order_bonus, -gap)
+            if score_key > best_key:
+                best_key = score_key
+                best_pair = (t.value, c.value)
+    return best_pair
+
+
 def sniff_track_code_with_labels(text: str):
     t = text.replace("\xa0", " ")
-    track_label_re = re.compile(r"(трек.*номер|трек\s*№|почтовый\s+идентификатор|идентификатор\s+отправления)", re.I)
-    code_label_re  = re.compile(r"код\s*доступа", re.I)
+    segments = []
+    logo_matches = list(LOGO_RE.finditer(t))
+    if logo_matches:
+        tail = t[logo_matches[-1].end():]
+        if tail.strip():
+            segments.append(tail)
+    segments.append(t)
 
-    def _after(m_end: int, kind: str):
-        window = re.sub(r"[^0-9\s]", " ", t[m_end:m_end+500])
-        window = re.sub(r"\s+", " ", window)
-        if kind == "track":
-            m = re.search(r"8(?:\s*\d){13}", window)
-            if m:
-                raw = re.sub(r"\s+", "", m.group(0))
-                if re.fullmatch(TRACK14, raw): return raw
-        if kind == "code":
-            m = re.search(r"(?:\d\s*){8}", window)
-            if m:
-                raw = re.sub(r"\s+", "", m.group(0))
-                if len(raw) == 8 and raw.isdigit(): return raw
-        return None
+    best_track = None
+    best_code = None
+    best_track_score = -1
+    best_code_score = -1
 
-    track = code = None
-    m1 = track_label_re.search(t)
-    if m1: track = _after(m1.end(), "track")
-    m2 = code_label_re.search(t)
-    if m2: code = _after(m2.end(), "code")
-    if track and code: return track, code
+    for segment in segments:
+        if not segment.strip():
+            continue
+        track_candidates: List[_NumberCandidate] = []
+        code_candidates: List[_NumberCandidate] = []
+        track_spans: List[Tuple[int, int]] = []
 
-    pg = re.sub(r"[^0-9\s]", " ", t)
-    pg = re.sub(r"\s+", " ", pg)
-    m = re.search(r"8(?:\s*\d){13}", pg)
-    if m:
-        raw = re.sub(r"\s+", "", m.group(0))
-        if re.fullmatch(TRACK14, raw):
-            track = raw
-            pg = pg.replace(m.group(0), " ")
-    m = re.search(r"(?:\d\s*){8}", pg)
-    if m:
-        raw = re.sub(r"\s+", "", m.group(0))
-        if len(raw) == 8 and raw.isdigit():
-            code = raw
-    return track, code
+        for match in TRACK_LABEL_RE.finditer(segment):
+            cand = _match_after_label(segment, match.end(), TRACK_SEQ_RE, 14, 4)
+            if cand:
+                track_candidates.append(cand)
+                track_spans.append((cand.start, cand.end))
+
+        for match in CODE_LABEL_RE.finditer(segment):
+            cand = _match_after_label(segment, match.end(), CODE_SEQ_RE, 8, 4)
+            if cand:
+                code_candidates.append(cand)
+
+        for match in TRACK_SEQ_RE.finditer(segment):
+            digits = re.sub(r"\D", "", match.group())
+            if not re.fullmatch(TRACK14, digits):
+                continue
+            start, end = match.start(), match.end()
+            context = segment[max(0, start - 80):min(len(segment), end + 80)]
+            score = 1
+            if TRACK_LABEL_RE.search(context):
+                score = 4
+            elif TRACK_CONTEXT_RE.search(context):
+                score = 2
+            track_candidates.append(_NumberCandidate(digits, start, end, score))
+            track_spans.append((start, end))
+
+        for match in CODE_SEQ_RE.finditer(segment):
+            digits = re.sub(r"\D", "", match.group())
+            if len(digits) != 8:
+                continue
+            start, end = match.start(), match.end()
+            if any(start >= ts and end <= te for ts, te in track_spans):
+                continue
+            context = segment[max(0, start - 80):min(len(segment), end + 80)]
+            if not CODE_CONTEXT_RE.search(context):
+                continue
+            score = 2
+            if CODE_LABEL_RE.search(context):
+                score = 4
+            code_candidates.append(_NumberCandidate(digits, start, end, score))
+
+        track_candidates = _dedup_candidates(track_candidates)
+        code_candidates = _dedup_candidates(code_candidates)
+
+        pair = _choose_best_pair(track_candidates, code_candidates)
+        if pair:
+            return pair
+
+        if track_candidates and track_candidates[0].score > best_track_score:
+            best_track = track_candidates[0].value
+            best_track_score = track_candidates[0].score
+        if code_candidates and code_candidates[0].score > best_code_score:
+            best_code = code_candidates[0].value
+            best_code_score = code_candidates[0].score
+
+    return best_track, best_code
 
 
 def process_pdf(pdf_path: Path,
