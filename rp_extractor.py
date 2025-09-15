@@ -28,6 +28,13 @@ except Exception:
 
 if os.name == "nt":
     tp = os.environ.get("TESSERACT_PATH")
+    if not tp or not os.path.exists(tp):
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        cand = base / "tesseract" / "Tesseract-OCR" / "tesseract.exe"
+        if not cand.exists():
+            cand = base / "Tesseract-OCR" / "tesseract.exe"
+        if cand.exists():
+            tp = str(cand)
     if tp and os.path.exists(tp):
         try:
             import pytesseract  # type: ignore
@@ -47,6 +54,11 @@ def extract_page_text_ocr(pdf_path: Path, pidx: int, dpi: int = 300, lang: str =
     if not OCR_AVAILABLE:
         return ""
     poppler_path = os.environ.get("POPPLER_PATH")
+    if not poppler_path:
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        cand = base / "poppler" / "bin"
+        if cand.is_dir():
+            poppler_path = str(cand)
     kwargs = {"dpi": dpi, "first_page": pidx + 1, "last_page": pidx + 1}
     if poppler_path and os.path.isdir(poppler_path):
         kwargs["poppler_path"] = poppler_path
@@ -99,15 +111,19 @@ def sniff_track_code_with_labels(text: str):
     if m2: code = _after(m2.end(), "code")
     if track and code: return track, code
 
-    pg = re.sub(r"[^0-9\s]", " ", t); pg = re.sub(r"\s+", " ", pg)
+    pg = re.sub(r"[^0-9\s]", " ", t)
+    pg = re.sub(r"\s+", " ", pg)
     m = re.search(r"8(?:\s*\d){13}", pg)
     if m:
         raw = re.sub(r"\s+", "", m.group(0))
-        if re.fullmatch(TRACK14, raw): track = raw
+        if re.fullmatch(TRACK14, raw):
+            track = raw
+            pg = pg.replace(m.group(0), " ")
     m = re.search(r"(?:\d\s*){8}", pg)
     if m:
         raw = re.sub(r"\s+", "", m.group(0))
-        if len(raw) == 8 and raw.isdigit(): code = raw
+        if len(raw) == 8 and raw.isdigit():
+            code = raw
     return track, code
 
 
