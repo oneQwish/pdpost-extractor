@@ -28,6 +28,13 @@ except Exception:
 
 if os.name == "nt":
     tp = os.environ.get("TESSERACT_PATH")
+    if not tp or not os.path.exists(tp):
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        cand = base / "tesseract" / "Tesseract-OCR" / "tesseract.exe"
+        if not cand.exists():
+            cand = base / "Tesseract-OCR" / "tesseract.exe"
+        if cand.exists():
+            tp = str(cand)
     if tp and os.path.exists(tp):
         try:
             import pytesseract  # type: ignore
@@ -47,6 +54,11 @@ def extract_page_text_ocr(pdf_path: Path, pidx: int, dpi: int = 300, lang: str =
     if not OCR_AVAILABLE:
         return ""
     poppler_path = os.environ.get("POPPLER_PATH")
+    if not poppler_path:
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        cand = base / "poppler" / "bin"
+        if cand.is_dir():
+            poppler_path = str(cand)
     kwargs = {"dpi": dpi, "first_page": pidx + 1, "last_page": pidx + 1}
     if poppler_path and os.path.isdir(poppler_path):
         kwargs["poppler_path"] = poppler_path
