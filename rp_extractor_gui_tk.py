@@ -14,13 +14,24 @@ def find_extractor_cmd():
     return ["rp_extractor"]
 class App(tk.Tk):
     def __init__(self):
-        super().__init__(); self.title(APP_TITLE); self.geometry("900x620")
+        super().__init__()
+        self._set_dark_theme()
+        self.title(APP_TITLE); self.geometry("900x620")
         self.in_path=tk.StringVar(); self.out_path=tk.StringVar()
         self.csv=tk.BooleanVar(value=True); self.no_ocr=tk.BooleanVar(value=False); self.force_ocr=tk.BooleanVar(value=False)
         self.max_pages=tk.IntVar(value=5); self.min_chars=tk.IntVar(value=200); self.workers=tk.IntVar(value=1)
         self.dpi=tk.IntVar(value=400); self.lang=tk.StringVar(value="rus+eng")
         self.dump_dir=tk.StringVar(value=""); self.log_path=tk.StringVar(value="")
         self.total=0; self.done=0; self.cancel_file=None; self._build_ui()
+    def _set_dark_theme(self):
+        bg="#2e2e2e"; fg="#ffffff"; accent="#5b9bd5"
+        s=ttk.Style(self); s.theme_use("clam")
+        s.configure(".", background=bg, foreground=fg)
+        s.configure("TEntry", fieldbackground="#3c3f41", foreground=fg)
+        s.configure("TCheckbutton", background=bg, foreground=fg)
+        s.configure("TButton", background="#444", foreground=fg)
+        s.configure("TProgressbar", background=accent)
+        self.configure(bg=bg)
     def _build_ui(self):
         pad={"padx":8,"pady":6}; frm=ttk.Frame(self); frm.pack(fill="both",expand=True)
         ttk.Label(frm,text="Вход (файл PDF или папка):").grid(row=0,column=0,sticky="w",**pad)
@@ -59,7 +70,7 @@ class App(tk.Tk):
         self.btn_start=ttk.Button(frm,text="Старт",command=self.start_run); self.btn_start.grid(row=row,column=0,**pad)
         self.btn_stop=ttk.Button(frm,text="Стоп",command=self.stop_run,state="disabled"); self.btn_stop.grid(row=row,column=1,**pad)
         row+=1
-        self.txt=tk.Text(frm,height=18); self.txt.grid(row=row,column=0,columnspan=4,sticky="nsew",**pad)
+        self.txt=tk.Text(frm,height=18,bg="#3c3f41",fg="#ffffff"); self.txt.grid(row=row,column=0,columnspan=4,sticky="nsew",**pad)
         frm.rowconfigure(row,weight=1); frm.columnconfigure(1,weight=1); frm.columnconfigure(3,weight=1)
     def browse_in_file(self):
         p=filedialog.askopenfilename(filetypes=[("PDF","*.pdf")]); 

@@ -182,19 +182,47 @@ def run_cli():
     ap.add_argument("--log", default=None)
     args = ap.parse_args()
 
-    pdfs = walk_pdfs(Path(args.input)); results=[]
-    for pdf in pdfs:
-        rec = process_pdf(pdf, args.max_pages_back, args.min_chars_for_ocr, not args.no_ocr,
-                          force_ocr=args.force_ocr, ocr_dpi=args.dpi, ocr_lang=args.lang)
-        results.append(rec)
+    pdfs = walk_pdfs(Path(args.input))
+    total = len(pdfs)
+    cancel_cb = None
+    if args.cancel_file:
+        def cancel_cb():
+            try:
+                return os.path.exists(args.cancel_file)
+            except Exception:
+                return False
+    if args.progress_stdout:
+        print(json.dumps({"event": "start", "total": total}), flush=True)
 
+    results = []
+    for pdf in pdfs:
+        if cancel_cb and cancel_cb():
+            break
+        rec = process_pdf(pdf, args.max_pages_back, args.min_chars_for_ocr, not args.no_ocr,
+                          cancel_cb=cancel_cb, force_ocr=args.force_ocr,
+                          ocr_dpi=args.dpi, ocr_lang=args.lang)
+        results.append(rec)
+        if args.progress_stdout:
+            evt = {"event": "progress", "file": rec["source"],
+                   "track": rec.get("track"), "code": rec.get("code"),
+                   "method": rec.get("method")}
+            print(json.dumps(evt, ensure_ascii=False), flush=True)
+
+    out_enc = "utf-8-sig" if os.name == "nt" else "utf-8"
     if args.csv or args.output.lower().endswith(".csv"):
-        with open(args.output,"w",newline="",encoding="utf-8") as f:
-            w=csv.writer(f); w.writerow(["filename","track","code"])
-            for r in results: w.writerow([r["source"], r["track"] or "", r["code"] or ""])
+        with open(args.output, "w", newline="", encoding=out_enc) as f:
+            w = csv.writer(f)
+            w.writerow(["filename", "track", "code"])
+            for r in results:
+                w.writerow([r["source"], r["track"] or "", r["code"] or ""])
     else:
-        with open(args.output,"w",encoding="utf-8") as f:
-            for r in results: f.write(f"{r['source']} - {r['track'] or ''} - {r['code'] or ''}\n")
+        with open(args.output, "w", encoding=out_enc) as f:
+            for r in results:
+                f.write(f"{r['source']} - {r['track'] or ''} - {r['code'] or ''}\n")
+
+    if args.progress_stdout:
+        print(json.dumps({"event": "done", "count": len(results),
+                          "output": args.output}, ensure_ascii=False), flush=True)
 
 
 if __name__=="__main__":
