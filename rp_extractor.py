@@ -111,15 +111,19 @@ def sniff_track_code_with_labels(text: str):
     if m2: code = _after(m2.end(), "code")
     if track and code: return track, code
 
-    pg = re.sub(r"[^0-9\s]", " ", t); pg = re.sub(r"\s+", " ", pg)
+    pg = re.sub(r"[^0-9\s]", " ", t)
+    pg = re.sub(r"\s+", " ", pg)
     m = re.search(r"8(?:\s*\d){13}", pg)
     if m:
         raw = re.sub(r"\s+", "", m.group(0))
-        if re.fullmatch(TRACK14, raw): track = raw
+        if re.fullmatch(TRACK14, raw):
+            track = raw
+            pg = pg.replace(m.group(0), " ")
     m = re.search(r"(?:\d\s*){8}", pg)
     if m:
         raw = re.sub(r"\s+", "", m.group(0))
-        if len(raw) == 8 and raw.isdigit(): code = raw
+        if len(raw) == 8 and raw.isdigit():
+            code = raw
     return track, code
 
 
