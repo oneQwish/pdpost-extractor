@@ -86,47 +86,45 @@ def get_page_count(pdf_path: Path) -> int:
 
 def sniff_track_code_with_labels(text: str):
     t = text.replace("\xa0", " ")
-
-    # Search within the area following the last "Почта России" marker.
-    logo_matches = list(re.finditer(r"почта\s+россии", t, re.I))
-    if logo_matches:
-        t = t[logo_matches[-1].end():]
-    else:
-        return None, None
-
-    track_label_re = re.compile(
-        r"(трек.*номер|трек\s*№|почтовый\s+идентификатор|идентификатор\s+отправления)",
-        re.I,
-    )
-    code_label_re = re.compile(r"код\s*доступа", re.I)
+    track_label_re = re.compile(r"(трек.*номер|трек\s*№|почтовый\s+идентификатор|идентификатор\s+отправления)", re.I)
+    code_label_re  = re.compile(r"код\s*доступа", re.I)
 
     def _after(m_end: int, kind: str):
-        window = re.sub(r"[^0-9\s]", " ", t[m_end : m_end + 500])
+        window = re.sub(r"[^0-9\s]", " ", t[m_end:m_end+500])
         window = re.sub(r"\s+", " ", window)
         if kind == "track":
             m = re.search(r"8(?:\s*\d){13}", window)
             if m:
                 raw = re.sub(r"\s+", "", m.group(0))
-                if re.fullmatch(TRACK14, raw):
-                    return raw
+                if re.fullmatch(TRACK14, raw): return raw
         if kind == "code":
             m = re.search(r"(?:\d\s*){8}", window)
             if m:
                 raw = re.sub(r"\s+", "", m.group(0))
-                if len(raw) == 8 and raw.isdigit():
-                    return raw
+                if len(raw) == 8 and raw.isdigit(): return raw
         return None
 
     track = code = None
     m1 = track_label_re.search(t)
-    if m1:
-        track = _after(m1.end(), "track")
+    if m1: track = _after(m1.end(), "track")
     m2 = code_label_re.search(t)
-    if m2:
-        code = _after(m2.end(), "code")
-    if track and code:
-        return track, code
-    return None, None
+    if m2: code = _after(m2.end(), "code")
+    if track and code: return track, code
+
+    pg = re.sub(r"[^0-9\s]", " ", t)
+    pg = re.sub(r"\s+", " ", pg)
+    m = re.search(r"8(?:\s*\d){13}", pg)
+    if m:
+        raw = re.sub(r"\s+", "", m.group(0))
+        if re.fullmatch(TRACK14, raw):
+            track = raw
+            pg = pg.replace(m.group(0), " ")
+    m = re.search(r"(?:\d\s*){8}", pg)
+    if m:
+        raw = re.sub(r"\s+", "", m.group(0))
+        if len(raw) == 8 and raw.isdigit():
+            code = raw
+    return track, code
 
 
 def process_pdf(pdf_path: Path,
