@@ -28,6 +28,13 @@ except Exception:
 
 if os.name == "nt":
     tp = os.environ.get("TESSERACT_PATH")
+    if not tp or not os.path.exists(tp):
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        cand = base / "tesseract" / "Tesseract-OCR" / "tesseract.exe"
+        if not cand.exists():
+            cand = base / "Tesseract-OCR" / "tesseract.exe"
+        if cand.exists():
+            tp = str(cand)
     if tp and os.path.exists(tp):
         try:
             import pytesseract  # type: ignore
@@ -47,6 +54,11 @@ def extract_page_text_ocr(pdf_path: Path, pidx: int, dpi: int = 300, lang: str =
     if not OCR_AVAILABLE:
         return ""
     poppler_path = os.environ.get("POPPLER_PATH")
+    if not poppler_path:
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        cand = base / "poppler" / "bin"
+        if cand.is_dir():
+            poppler_path = str(cand)
     kwargs = {"dpi": dpi, "first_page": pidx + 1, "last_page": pidx + 1}
     if poppler_path and os.path.isdir(poppler_path):
         kwargs["poppler_path"] = poppler_path
@@ -99,15 +111,19 @@ def sniff_track_code_with_labels(text: str):
     if m2: code = _after(m2.end(), "code")
     if track and code: return track, code
 
-    pg = re.sub(r"[^0-9\s]", " ", t); pg = re.sub(r"\s+", " ", pg)
+    pg = re.sub(r"[^0-9\s]", " ", t)
+    pg = re.sub(r"\s+", " ", pg)
     m = re.search(r"8(?:\s*\d){13}", pg)
     if m:
         raw = re.sub(r"\s+", "", m.group(0))
-        if re.fullmatch(TRACK14, raw): track = raw
+        if re.fullmatch(TRACK14, raw):
+            track = raw
+            pg = pg.replace(m.group(0), " ")
     m = re.search(r"(?:\d\s*){8}", pg)
     if m:
         raw = re.sub(r"\s+", "", m.group(0))
-        if len(raw) == 8 and raw.isdigit(): code = raw
+        if len(raw) == 8 and raw.isdigit():
+            code = raw
     return track, code
 
 
@@ -166,19 +182,47 @@ def run_cli():
     ap.add_argument("--log", default=None)
     args = ap.parse_args()
 
-    pdfs = walk_pdfs(Path(args.input)); results=[]
-    for pdf in pdfs:
-        rec = process_pdf(pdf, args.max_pages_back, args.min_chars_for_ocr, not args.no_ocr,
-                          force_ocr=args.force_ocr, ocr_dpi=args.dpi, ocr_lang=args.lang)
-        results.append(rec)
+    pdfs = walk_pdfs(Path(args.input))
+    total = len(pdfs)
+    cancel_cb = None
+    if args.cancel_file:
+        def cancel_cb():
+            try:
+                return os.path.exists(args.cancel_file)
+            except Exception:
+                return False
+    if args.progress_stdout:
+        print(json.dumps({"event": "start", "total": total}), flush=True)
 
+    results = []
+    for pdf in pdfs:
+        if cancel_cb and cancel_cb():
+            break
+        rec = process_pdf(pdf, args.max_pages_back, args.min_chars_for_ocr, not args.no_ocr,
+                          cancel_cb=cancel_cb, force_ocr=args.force_ocr,
+                          ocr_dpi=args.dpi, ocr_lang=args.lang)
+        results.append(rec)
+        if args.progress_stdout:
+            evt = {"event": "progress", "file": rec["source"],
+                   "track": rec.get("track"), "code": rec.get("code"),
+                   "method": rec.get("method")}
+            print(json.dumps(evt, ensure_ascii=False), flush=True)
+
+    out_enc = "utf-8-sig" if os.name == "nt" else "utf-8"
     if args.csv or args.output.lower().endswith(".csv"):
-        with open(args.output,"w",newline="",encoding="utf-8") as f:
-            w=csv.writer(f); w.writerow(["filename","track","code"])
-            for r in results: w.writerow([r["source"], r["track"] or "", r["code"] or ""])
+        with open(args.output, "w", newline="", encoding=out_enc) as f:
+            w = csv.writer(f)
+            w.writerow(["filename", "track", "code"])
+            for r in results:
+                w.writerow([r["source"], r["track"] or "", r["code"] or ""])
     else:
-        with open(args.output,"w",encoding="utf-8") as f:
-            for r in results: f.write(f"{r['source']} - {r['track'] or ''} - {r['code'] or ''}\n")
+        with open(args.output, "w", encoding=out_enc) as f:
+            for r in results:
+                f.write(f"{r['source']} - {r['track'] or ''} - {r['code'] or ''}\n")
+
+    if args.progress_stdout:
+        print(json.dumps({"event": "done", "count": len(results),
+                          "output": args.output}, ensure_ascii=False), flush=True)
 
 
 if __name__=="__main__":
