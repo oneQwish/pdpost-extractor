@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Минимальный Tkinter-GUI для запуска CLI-утилиты извлечения PDF."""
+
 import os
 import sys
 import json
@@ -14,10 +16,14 @@ APP_TITLE = "Russian Post PDF Extractor — Minimal GUI"
 
 
 def is_frozen():
+    """Возвращает True, если приложение запущено из упакованного бинарника."""
+
     return getattr(sys, "frozen", False)
 
 
 def find_extractor_cmd():
+    """Находит исполняемый файл CLI для запуска из GUI."""
+
     here = os.path.dirname(os.path.abspath(__file__))
     if is_frozen():
         exe = os.path.join(here, "rp_extractor.exe")
@@ -30,11 +36,16 @@ def find_extractor_cmd():
 
 
 class App(tk.Tk):
+    """Главное окно приложения: управляет состоянием и взаимодействует с CLI."""
+
     def __init__(self):
+        """Настраивает окно, переменные состояния и интерфейс."""
         super().__init__()
         self._set_dark_theme()
         self.title(APP_TITLE)
         self.geometry("960x660")
+        # Tkinter-переменные позволяют автоматически обновлять привязанные
+        # элементы управления и следить за изменениями значений.
         self.in_path = tk.StringVar()
         self.out_path = tk.StringVar()
         self.csv = tk.BooleanVar(value=True)
@@ -54,11 +65,14 @@ class App(tk.Tk):
         self._last_output = ""
         self._cancel_requested = False
         self._saw_done_event = False
+        # Триггеры обновляют связанные поля при изменении настроек пользователем.
         self.csv.trace_add("write", lambda *_: self._ensure_output_extension())
         self.out_path.trace_add("write", lambda *_: self._update_open_buttons())
         self.log_path.trace_add("write", lambda *_: self._update_open_buttons())
         self._build_ui()
     def _set_dark_theme(self):
+        """Применяет тёмную цветовую схему ко всем элементам управления."""
+
         bg = "#2e2e2e"
         fg = "#ffffff"
         accent = "#5b9bd5"
@@ -72,6 +86,8 @@ class App(tk.Tk):
         self.configure(bg=bg)
 
     def _build_ui(self):
+        """Создаёт и размещает виджеты интерфейса."""
+
         pad = {"padx": 8, "pady": 6}
         frm = ttk.Frame(self)
         frm.pack(fill="both", expand=True, padx=12, pady=12)
@@ -164,6 +180,8 @@ class App(tk.Tk):
         self._update_open_buttons()
 
     def _update_open_buttons(self):
+        """Активирует или блокирует кнопки открытия файлов в зависимости от их наличия."""
+
         out = Path(self.out_path.get().strip())
         log = Path(self.log_path.get().strip())
         out_exists = out.is_file()
@@ -172,6 +190,8 @@ class App(tk.Tk):
         self.btn_open_log.configure(state="normal" if log_exists else "disabled")
 
     def _open_path(self, path: Path):
+        """Открывает файл или каталог средствами ОС."""
+
         try:
             if os.name == "nt":
                 os.startfile(str(path))  # type: ignore[attr-defined]
@@ -183,6 +203,8 @@ class App(tk.Tk):
             messagebox.showerror("Ошибка", f"Не удалось открыть {path}: {exc}")
 
     def open_output(self):
+        """Открывает файл с результатами, если он существует."""
+
         path = Path(self.out_path.get().strip())
         if not path.exists():
             messagebox.showwarning("Нет файла", "Файл ещё не создан.")
@@ -190,6 +212,8 @@ class App(tk.Tk):
         self._open_path(path)
 
     def open_log(self):
+        """Открывает файл журнала, если он создан."""
+
         path = Path(self.log_path.get().strip())
         if not path.exists():
             messagebox.showwarning("Нет файла", "Лог ещё не создан.")
@@ -197,6 +221,8 @@ class App(tk.Tk):
         self._open_path(path)
 
     def _ensure_output_extension(self, *_args):
+        """Следит за тем, чтобы расширение выходного файла соответствовало режиму."""
+
         out_raw = self.out_path.get().strip()
         if not out_raw:
             return
@@ -208,6 +234,8 @@ class App(tk.Tk):
         self._update_open_buttons()
 
     def _auto_fill_output(self, selected: Path):
+        """Предлагает имя файла вывода на основе выбранного пути."""
+
         if self.out_path.get().strip():
             return
         suffix = ".csv" if self.csv.get() else ".txt"
@@ -219,6 +247,8 @@ class App(tk.Tk):
         self._update_open_buttons()
 
     def _set_running(self, running: bool):
+        """Переключает состояние кнопок при запуске/остановке обработки."""
+
         if running:
             self.btn_start.configure(state="disabled")
             self.btn_stop.configure(state="normal")
@@ -230,6 +260,8 @@ class App(tk.Tk):
             self._update_open_buttons()
 
     def _reset_progress(self):
+        """Сбрасывает индикатор выполнения и связанные счётчики."""
+
         self.total = 0
         self.done = 0
         self._saw_done_event = False
@@ -238,6 +270,8 @@ class App(tk.Tk):
         self.pb_txt.configure(text="0/0")
 
     def _on_run_finished(self, return_code):
+        """Обрабатывает завершение процесса CLI и обновляет интерфейс."""
+
         self._set_running(False)
         if self.cancel_file:
             cf = Path(self.cancel_file)
@@ -260,18 +294,24 @@ class App(tk.Tk):
         self._update_open_buttons()
         self._cancel_requested = False
     def browse_in_file(self):
+        """Открывает диалог выбора PDF-файла для обработки."""
+
         path = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
         if path:
             self.in_path.set(path)
             self._auto_fill_output(Path(path))
 
     def browse_in_dir(self):
+        """Выбирает папку, содержащую PDF-файлы."""
+
         path = filedialog.askdirectory()
         if path:
             self.in_path.set(path)
             self._auto_fill_output(Path(path))
 
     def browse_out_file(self):
+        """Позволяет выбрать или создать файл для сохранения результатов."""
+
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV", "*.csv"), ("TXT", "*.txt"), ("Все", "*.*")],
@@ -281,11 +321,15 @@ class App(tk.Tk):
             self._ensure_output_extension()
 
     def browse_dump_dir(self):
+        """Выбирает каталог, куда сохранять текстовые дампы для отладки."""
+
         path = filedialog.askdirectory()
         if path:
             self.dump_dir.set(path)
 
     def browse_log(self):
+        """Выбирает путь для файла журнала CLI."""
+
         path = filedialog.asksaveasfilename(
             defaultextension=".log",
             filetypes=[("Log", "*.log"), ("All", "*.*")],
@@ -294,6 +338,8 @@ class App(tk.Tk):
             self.log_path.set(path)
             self._update_open_buttons()
     def build_cmd(self, cancel_file: str):
+        """Формирует список аргументов для запуска CLI с текущими настройками."""
+
         input_path = str(Path(self.in_path.get().strip()).expanduser())
         output_path = str(Path(self.out_path.get().strip()).expanduser())
         cmd = find_extractor_cmd()
@@ -332,6 +378,8 @@ class App(tk.Tk):
             cmd += ["--log", str(Path(log_path).expanduser())]
         return cmd
     def start_run(self):
+        """Валидирует ввод пользователя и запускает обработку в фоне."""
+
         in_raw = self.in_path.get().strip()
         out_raw = self.out_path.get().strip()
         if not in_raw or not out_raw:
@@ -369,6 +417,8 @@ class App(tk.Tk):
         self._cancel_requested = False
         threading.Thread(target=self._run_proc, args=(cmd,), daemon=True).start()
     def stop_run(self):
+        """Создаёт файл-флаг отмены, чтобы остановить текущий запуск."""
+
         if not self.cancel_file:
             return
         try:
@@ -380,6 +430,8 @@ class App(tk.Tk):
         except Exception as exc:
             self._append(f"[CANCEL ERROR] {exc}")
     def _run_proc(self, cmd):
+        """Запускает CLI в отдельном потоке и транслирует события в GUI."""
+
         rc = None
         try:
             si = None
@@ -408,10 +460,14 @@ class App(tk.Tk):
         finally:
             self.after(0, self._on_run_finished, rc)
     def _append(self, msg):
+        """Добавляет строку в текстовый журнал внизу окна."""
+
         self.txt.insert("end", msg + "\n")
         self.txt.see("end")
 
     def _handle_line(self, line: str):
+        """Обрабатывает строку вывода CLI, распознавая JSON-события."""
+
         try:
             evt = json.loads(line)
         except json.JSONDecodeError:
