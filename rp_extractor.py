@@ -12,9 +12,16 @@ import importlib.util
 
 
 def _has_module(name: str) -> bool:
+    """Проверяет доступность модуля без его импорта."""
+
     try:
+        # find_spec возвращает описание модуля, если он установлен и может
+        # быть импортирован. Это безопаснее, чем прямой import внутри блока
+        # try/except, потому что не выполняет код модуля.
         return importlib.util.find_spec(name) is not None
     except ModuleNotFoundError:  # pragma: no cover - depends on environment
+        # В редких окружениях importlib может сам выбросить ошибку, поэтому
+        # обрабатываем её и считаем, что модуль недоступен.
         return False
 
 from dataclasses import dataclass
@@ -24,8 +31,10 @@ from typing import Callable, Optional, Dict, List, Tuple, Union
 logger = logging.getLogger("rp_extractor")
 
 DEBUG_DUMP_DIR: Optional[str] = None
+# Формат трек-номера: всегда 14 цифр, начинающихся с «8».
 TRACK14 = r"8\d{13}"
 
+# Регулярные выражения, описывающие типичные подписи и окружения в уведомлениях.
 LOGO_RE = re.compile(r"почта\s+россии", re.I)
 
 TRACK_LABEL_RE = re.compile(
@@ -45,12 +54,15 @@ CODE_SEQ_RE = re.compile(r"\d(?:[\s\u00a0-]*\d){7}")
 
 @dataclass
 class _NumberCandidate:
+    """Хранит найденную числовую последовательность с метаданными."""
+
     value: str
     start: int
     end: int
     score: int
 
 
+# Проверяем доступность зависимостей, чтобы подбирать рабочие методы извлечения текста.
 _pdfminer_available = _has_module("pdfminer.high_level")
 if _pdfminer_available:
     from pdfminer.high_level import extract_text
@@ -77,21 +89,34 @@ OCR_AVAILABLE = _pdf2image_available and _pytesseract_available
 
 
 def _configure_logging(log_path: str) -> None:
+    """Подготавливает файловый логгер, если указан путь к файлу."""
+
     if not log_path:
+        # Если путь не задан (например, запуск без флага --log), просто
+        # выходим — логирование в файл не требуется.
         return
     try:
         path = Path(log_path)
+        # Создаём родительские каталоги, чтобы не получить ошибку FileNotFoundError
+        # при открытии файла логов.
         if path.parent and not path.parent.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(path, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        # Используем корневой логгер, чтобы перехватывать сообщения со всего
+        # приложения; уровень INFO покрывает как ошибки, так и прогресс.
         root = logging.getLogger()
         root.setLevel(logging.INFO)
         root.addHandler(handler)
     except Exception:
+        # Ошибки конфигурации логирования не должны прерывать работу
+        # приложения, поэтому просто фиксируем их в стандартном логере.
         logger.exception("Failed to configure logging to %s", log_path)
 
 if os.name == "nt" and pytesseract is not None:
+    # При сборке Windows-версии tesseract.exe может лежать рядом с
+    # приложением. Здесь мы пытаемся найти исполняемый файл и передать
+    # путь библиотеке pytesseract, чтобы OCR работал "из коробки".
     tp = os.environ.get("TESSERACT_PATH")
     if not tp or not os.path.exists(tp):
         base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -105,19 +130,31 @@ if os.name == "nt" and pytesseract is not None:
 
 
 def extract_page_text_pdfminer(pdf_path: Path, pidx: int) -> str:
+    """Извлекает текст страницы PDF с помощью pdfminer."""
+
     if not _pdfminer_available or extract_text is None:
+        # Если библиотека не установлена (например, в portable-версии),
+        # возвращаем пустую строку, чтобы вызвать резервные механизмы.
         return ""
     try:
+        # pdfminer позволяет извлечь текст конкретной страницы по индексу.
         return extract_text(str(pdf_path), page_numbers=[pidx]) or ""
     except Exception:
+        # PDF-файлы бывают "сломанными"; игнорируем ошибки, чтобы позднее
+        # попробовать OCR или следующую страницу.
         return ""
 
 
 def extract_page_text_ocr(pdf_path: Path, pidx: int, dpi: int = 300, lang: str = "rus+eng") -> str:
+    """Делает OCR страницы PDF и возвращает распознанный текст."""
+
     if not OCR_AVAILABLE or convert_from_path is None or pytesseract is None:
+        # Если нет poppler/pdf2image или pytesseract, OCR недоступен.
         return ""
     poppler_path = os.environ.get("POPPLER_PATH")
     if not poppler_path:
+        # В сборках PyInstaller зависимость poppler может поставляться рядом с
+        # приложением. Проверяем стандартные вложенные каталоги.
         base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
         cand = base / "poppler" / "bin"
         if cand.is_dir():
@@ -126,33 +163,49 @@ def extract_page_text_ocr(pdf_path: Path, pidx: int, dpi: int = 300, lang: str =
     if poppler_path and os.path.isdir(poppler_path):
         kwargs["poppler_path"] = poppler_path
     try:
+        # convert_from_path рендерит страницу PDF в изображение, которое затем
+        # передаётся в pytesseract для распознавания.
         imgs = convert_from_path(str(pdf_path), **kwargs)
         if not imgs:
             return ""
         return pytesseract.image_to_string(imgs[0], lang=lang) or ""
     except Exception:
+        # Ошибки рендеринга/распознавания не критичны — просто возвращаем
+        # пустой текст, чтобы алгоритм попробовал другой способ.
         return ""
 
 
 def get_page_count(pdf_path: Path) -> int:
+    """Определяет количество страниц PDF с fallback'ами."""
+
     if _pdfminer_available and PDFParser and PDFDocument and PDFPage:
         try:
             with open(pdf_path, "rb") as f:
                 parser = PDFParser(f)
                 doc = PDFDocument(parser)
+                # Перебираем все страницы, чтобы узнать их число. PDFPage сам
+                # обрабатывает внутренние структуры документа.
                 return sum(1 for _ in PDFPage.create_pages(doc))
         except Exception:
+            # Если pdfminer не справился, пробуем запасной путь.
             pass
     if convert_from_path is not None:
         try:
+            # pdf2image не возвращает количество страниц, но если рендер
+            # первой страницы успешен, значит документ содержит >=1 страницу.
             convert_from_path(str(pdf_path), first_page=1, last_page=1)
             return 2
         except Exception:
             pass
+    # В крайнем случае считаем, что документ одностраничный.
     return 1
 
 
-def _coerce_cancel_callback(cancel_cb: Optional[Union[Callable[[], bool], str, os.PathLike]]) -> Optional[Callable[[], bool]]:
+def _coerce_cancel_callback(
+    cancel_cb: Optional[Union[Callable[[], bool], str, os.PathLike]]
+) -> Optional[Callable[[], bool]]:
+    """Превращает путь к файлу отмены в callable или возвращает исходный callback."""
+
     if cancel_cb is None:
         return None
     if callable(cancel_cb):
@@ -161,6 +214,8 @@ def _coerce_cancel_callback(cancel_cb: Optional[Union[Callable[[], bool], str, o
 
     def _check() -> bool:
         try:
+            # Для совместимости с GUI: отмена считается запрошенной, если
+            # появляется файл-флаг, созданный интерфейсом.
             return path.exists()
         except Exception:
             return False
@@ -169,6 +224,8 @@ def _coerce_cancel_callback(cancel_cb: Optional[Union[Callable[[], bool], str, o
 
 
 def _dump_debug_text(pdf_path: Path, page_idx: int, kind: str, text: str) -> None:
+    """Сохраняет распознанный текст на диск для последующей отладки."""
+
     if not DEBUG_DUMP_DIR or not text:
         return
     try:
@@ -179,10 +236,13 @@ def _dump_debug_text(pdf_path: Path, page_idx: int, kind: str, text: str) -> Non
         with open(out, "w", encoding="utf-8") as fh:
             fh.write(text)
     except Exception:
+        # Сбои при дампе не критичны — просто выводим отладочное сообщение.
         logger.debug("Failed to dump debug text for %s page %s", pdf_path, page_idx + 1, exc_info=True)
 
 
 def _should_cancel(cancel_file: Optional[Union[str, os.PathLike]]) -> bool:
+    """Возвращает True, если существует файл отмены."""
+
     if not cancel_file:
         return False
     try:
@@ -191,12 +251,15 @@ def _should_cancel(cancel_file: Optional[Union[str, os.PathLike]]) -> bool:
         return False
 
 
-def process_pdf_files(pdfs: List[Path],
-                      workers: int,
-                      process_kwargs: Dict[str, object],
-                      cancel_file: Optional[Union[str, os.PathLike]] = None,
-                      progress_cb: Optional[Callable[[Dict[str, Optional[str]]], None]] = None
-                      ) -> List[Dict[str, Optional[str]]]:
+def process_pdf_files(
+    pdfs: List[Path],
+    workers: int,
+    process_kwargs: Dict[str, object],
+    cancel_file: Optional[Union[str, os.PathLike]] = None,
+    progress_cb: Optional[Callable[[Dict[str, Optional[str]]], None]] = None,
+) -> List[Dict[str, Optional[str]]]:
+    """Обрабатывает список PDF-файлов последовательно или в пуле потоков."""
+
     if not pdfs:
         return []
     if _should_cancel(cancel_file):
@@ -204,11 +267,14 @@ def process_pdf_files(pdfs: List[Path],
     results: Dict[int, Dict[str, Optional[str]]] = {}
     max_workers = workers if isinstance(workers, int) else 1
     if max_workers <= 0:
+        # Значение 0 используется как "авто" — равное количеству CPU.
         cpu = os.cpu_count() or 1
         max_workers = max(1, cpu)
+    # Нет смысла создавать потоков больше, чем файлов.
     max_workers = min(max_workers, len(pdfs))
 
     def _handle_result(idx: int, record: Dict[str, Optional[str]]):
+        # Сохраняем результат под исходным индексом и уведомляем GUI о прогрессе.
         results[idx] = record
         if progress_cb:
             try:
@@ -217,6 +283,8 @@ def process_pdf_files(pdfs: List[Path],
                 logger.debug("Progress callback failed for %s", record.get("source"), exc_info=True)
 
     if max_workers == 1:
+        # Последовательная обработка используется по умолчанию — предсказуемо
+        # и не требует потоков.
         for idx, pdf in enumerate(pdfs):
             if _should_cancel(cancel_file):
                 break
@@ -235,6 +303,7 @@ def process_pdf_files(pdfs: List[Path],
             for idx, pdf in enumerate(pdfs):
                 if _should_cancel(cancel_file):
                     break
+                # Запускаем обработку файла в отдельном рабочем потоке.
                 future = executor.submit(process_pdf, pdf, **process_kwargs)
                 futures[future] = idx
             for future in concurrent.futures.as_completed(futures):
@@ -255,7 +324,7 @@ def process_pdf_files(pdfs: List[Path],
 
 
 def _extract_line_context(text: str, start: int, end: int) -> Tuple[str, str, str]:
-    """Return the line containing the span together with its neighbours."""
+    """Возвращает строку со сработавшим совпадением и соседние строки."""
     line_start = text.rfind("\n", 0, start)
     if line_start == -1:
         line_start = 0
@@ -287,7 +356,15 @@ def _extract_line_context(text: str, start: int, end: int) -> Tuple[str, str, st
     return line_text, prev_line, next_line
 
 
-def _match_after_label(segment: str, start_idx: int, seq_re: re.Pattern, expected_len: int, base_score: int) -> Optional[_NumberCandidate]:
+def _match_after_label(
+    segment: str,
+    start_idx: int,
+    seq_re: re.Pattern,
+    expected_len: int,
+    base_score: int,
+) -> Optional[_NumberCandidate]:
+    """Ищет числовую последовательность после найденного текстового ярлыка."""
+
     window = segment[start_idx:start_idx + 500]
     m = seq_re.search(window)
     if not m:
@@ -301,6 +378,8 @@ def _match_after_label(segment: str, start_idx: int, seq_re: re.Pattern, expecte
 
 
 def _dedup_candidates(candidates: List[_NumberCandidate]) -> List[_NumberCandidate]:
+    """Удаляет дубликаты кандидатов, сохраняя самых релевантных."""
+
     ordered = sorted(candidates, key=lambda c: (-c.score, c.start, c.end, c.value))
     seen = set()
     result: List[_NumberCandidate] = []
@@ -314,6 +393,8 @@ def _dedup_candidates(candidates: List[_NumberCandidate]) -> List[_NumberCandida
 
 
 def _choose_best_pair(tracks: List[_NumberCandidate], codes: List[_NumberCandidate]):
+    """Подбирает пару "трек + код", расположенную близко друг к другу."""
+
     best_pair = None
     best_key = (-1, -1, -1)
     for t in tracks:
@@ -335,11 +416,17 @@ def _choose_best_pair(tracks: List[_NumberCandidate], codes: List[_NumberCandida
 
 
 def sniff_track_code_with_labels(text: str):
+    """Ищет в тексте PDF трек-номер и код получения, анализируя подписи."""
+
+    # Неразрывные пробелы заменяем на обычные, чтобы регулярные выражения
+    # находили совпадения без дополнительных условий.
     t = text.replace("\xa0", " ").replace("\u202f", " ")
 
     segments = []
     logo_matches = list(LOGO_RE.finditer(t))
     if logo_matches:
+        # На уведомлениях Почты логотип часто расположен в начале; текст после
+        # него содержит полезные данные, поэтому анализируем этот "хвост" отдельно.
         tail = t[logo_matches[-1].end():]
         if tail.strip():
             segments.append(tail)
@@ -357,6 +444,7 @@ def sniff_track_code_with_labels(text: str):
         code_candidates: List[_NumberCandidate] = []
         track_spans: List[Tuple[int, int]] = []
 
+        # Сперва пытаемся найти числа сразу после слов "трек", "идентификатор" и т.п.
         for match in TRACK_LABEL_RE.finditer(segment):
             cand = _match_after_label(segment, match.end(), TRACK_SEQ_RE, 14, 4)
             if cand:
@@ -368,6 +456,8 @@ def sniff_track_code_with_labels(text: str):
             if cand:
                 code_candidates.append(cand)
 
+        # Дополнительно ищем последовательности цифр подходящего формата — они
+        # могут встретиться без явных подписей.
         for match in TRACK_SEQ_RE.finditer(segment):
             digits = re.sub(r"\D", "", match.group())
             if not re.fullmatch(TRACK14, digits):
@@ -387,6 +477,7 @@ def sniff_track_code_with_labels(text: str):
             if len(digits) != 8:
                 continue
             start, end = match.start(), match.end()
+            # Исключаем числа, попавшие внутрь трек-номера (OCR может разбить его на части).
             if any(start >= ts and end <= te for ts, te in track_spans):
                 continue
             context = segment[max(0, start - 80):min(len(segment), end + 80)]
@@ -431,20 +522,27 @@ def sniff_track_code_with_labels(text: str):
     return best_track, best_code
 
 
-def process_pdf(pdf_path: Path,
-                max_pages_back=5,
-                min_chars_for_ocr=200,
-                enable_ocr=True,
-                cancel_cb=None,
-                force_ocr=False,
-                ocr_dpi=300,
-                ocr_lang="rus+eng") -> Dict[str, Optional[str]]:
+def process_pdf(
+    pdf_path: Path,
+    max_pages_back=5,
+    min_chars_for_ocr=200,
+    enable_ocr=True,
+    cancel_cb=None,
+    force_ocr=False,
+    ocr_dpi=300,
+    ocr_lang="rus+eng",
+) -> Dict[str, Optional[str]]:
+    """Обрабатывает один PDF и пытается извлечь из него трек и код."""
+
     res = {"source": pdf_path.name, "track": None, "code": None, "method": ""}
     cancel_fn = _coerce_cancel_callback(cancel_cb)
     ocr_threshold = max(0, int(min_chars_for_ocr or 0))
     total_pages = max(1, get_page_count(pdf_path))
-    pages = list(range(total_pages-1, -1, -1))
-    if max_pages_back > 0: pages = pages[:max_pages_back]
+    # Бежим по страницам в обратном порядке: в уведомлениях нужные данные
+    # обычно находятся ближе к концу документа.
+    pages = list(range(total_pages - 1, -1, -1))
+    if max_pages_back > 0:
+        pages = pages[:max_pages_back]
 
     for pidx in pages:
         if cancel_fn and cancel_fn():
@@ -462,6 +560,8 @@ def process_pdf(pdf_path: Path,
                 method = "text"
         need_ocr = False
         if enable_ocr:
+            # OCR включается либо по требованию пользователя (force_ocr), либо
+            # если текстового слоя недостаточно для уверенного поиска.
             if force_ocr:
                 need_ocr = True
             elif (not tr or not cd) and len(txt) < ocr_threshold:
@@ -481,13 +581,19 @@ def process_pdf(pdf_path: Path,
 
 
 def walk_pdfs(path: Path):
-    if path.is_file() and path.suffix.lower()==".pdf": return [path]
+    """Возвращает список PDF-файлов: одиночный файл или все из каталога."""
+
+    if path.is_file() and path.suffix.lower() == ".pdf":
+        return [path]
     return sorted(p for p in path.rglob("*.pdf") if p.is_file())
 
 
 def run_cli():
+    """Точка входа командной строки: разбирает аргументы и запускает обработку."""
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input"); ap.add_argument("--output")
+    ap.add_argument("--input")
+    ap.add_argument("--output")
     ap.add_argument("--csv", action="store_true")
     ap.add_argument("--max-pages-back", type=int, default=5)
     ap.add_argument("--min-chars-for-ocr", type=int, default=200)
@@ -496,7 +602,7 @@ def run_cli():
     ap.add_argument("--force-ocr", action="store_true", dest="force_ocr", default=False)
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--lang", default="rus+eng")
-    # GUI flags (ignored internally but accepted)
+    # Флаги для GUI: CLI их не использует напрямую, но принимает.
     ap.add_argument("--progress-stdout", action="store_true")
     ap.add_argument("--cancel-file", default="")
     ap.add_argument("--debug-dump-text", default="")
@@ -528,6 +634,7 @@ def run_cli():
 
     progress_cb = None
     if args.progress_stdout:
+
         def progress_cb(rec: Dict[str, Optional[str]]):
             evt = {
                 "event": "progress",
@@ -559,8 +666,13 @@ def run_cli():
                 f.write(f"{r['source']} - {r['track'] or ''} - {r['code'] or ''}\n")
 
     if args.progress_stdout:
-        print(json.dumps({"event": "done", "count": len(results),
-                          "output": args.output}, ensure_ascii=False), flush=True)
+        print(
+            json.dumps(
+                {"event": "done", "count": len(results), "output": args.output},
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
 
 
 if __name__=="__main__":
