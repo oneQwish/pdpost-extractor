@@ -103,4 +103,17 @@ def test_sniff_detects_code_with_label_on_previous_line():
     track, code = sniff_track_code_with_labels(text)
     assert track == "80001234567890"
     assert code == "11223344"
+
+
+def test_sniff_prefers_labelled_code_over_address_digits():
+    text = (
+        "ШПИ 8010 4511 6495 46\n"
+        "Куда: 199034, г. Санкт-Петербург, наб. Лейтенанта Шмидта,\n"
+        "д. 5/16, литера А, пом. 2-н, ком. 65\n"
+        "199034 Получайте и отправляйте письма онлайн.\n"
+        "Код доступа: 8126 4026\n"
+    )
+    track, code = sniff_track_code_with_labels(text)
+    assert track == "80104511649546"
+    assert code == "81264026"
     

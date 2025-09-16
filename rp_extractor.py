@@ -403,7 +403,11 @@ def sniff_track_code_with_labels(text: str):
             if CODE_LABEL_RE.search(line_text) or CODE_LABEL_RE.search(prev_line):
                 score = 5
             elif CODE_LABEL_RE.search(next_line):
-                score = max(score, 5)
+                clean_line = re.sub(r"[\s\u00a0-]", "", line_text)
+                if clean_line.isdigit() and clean_line == digits:
+                    score = max(score, 5)
+                else:
+                    score = max(score, 3)
             elif line_has_code_kw:
                 score = 4
             elif CODE_CONTEXT_RE.search(prev_line) or CODE_CONTEXT_RE.search(next_line):
