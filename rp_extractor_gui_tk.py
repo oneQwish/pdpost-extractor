@@ -80,6 +80,7 @@ class App(tk.Tk):
         style.theme_use("clam")
         style.configure(".", background=bg, foreground=fg)
         style.configure("TEntry", fieldbackground="#3c3f41", foreground=fg)
+        style.configure("TSpinbox", fieldbackground="#3c3f41", foreground=fg)
         style.configure("TCheckbutton", background=bg, foreground=fg)
         style.configure("TButton", background="#444", foreground=fg)
         style.configure("TProgressbar", background=accent)
